@@ -22,6 +22,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -159,17 +160,53 @@ async def correct_pptx_highlighted(
 # ── Sync helper (runs in thread-pool) ────────────────────────
 
 
+def _clean_base64(raw: str) -> bytes:
+    """Decode base64 that may contain data-URI prefixes, whitespace, or line breaks."""
+    b64 = raw.strip()
+
+    # Strip data-URI prefix  (e.g. "data:application/…;base64,<payload>")
+    if b64.startswith("data:"):
+        _, _, b64 = b64.partition(",")
+
+    # Remove any whitespace / line breaks the LLM may have injected
+    b64 = re.sub(r"\s+", "", b64)
+
+    # Standard base64 or URL-safe base64
+    try:
+        return base64.b64decode(b64)
+    except Exception:
+        return base64.urlsafe_b64decode(b64)
+
+
 def _correct_sync(
     file_base64: str, filename: str, highlighted: bool, color: str
 ) -> str:
     """Run the synchronous PPT correction logic in a worker thread."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / filename
-        stem = Path(filename).stem
+        # Sanitise filename – keep only the basename to avoid path traversal
+        safe_name = Path(filename).name or "presentation.pptx"
+        if not safe_name.lower().endswith((".pptx", ".ppt")):
+            safe_name += ".pptx"
+
+        input_path = Path(tmpdir) / safe_name
+        stem = Path(safe_name).stem
         output_path = Path(tmpdir) / f"{stem}_v_correctedbyai.pptx"
 
         # Decode & write input file
-        input_path.write_bytes(base64.b64decode(file_base64))
+        file_bytes = _clean_base64(file_base64)
+        if len(file_bytes) < 100:
+            raise ValueError(
+                f"Decoded file is only {len(file_bytes)} bytes – "
+                "the base64 payload is likely empty or corrupt."
+            )
+        input_path.write_bytes(file_bytes)
+
+        # Quick sanity check: .pptx is a zip file (magic bytes PK\x03\x04)
+        if file_bytes[:4] != b"PK\x03\x04":
+            raise ValueError(
+                "Decoded file is not a valid .pptx (ZIP) package. "
+                "Make sure the entire file is base64-encoded, not just a snippet."
+            )
 
         # Call the appropriate corrector
         if highlighted:
