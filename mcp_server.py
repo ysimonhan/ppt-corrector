@@ -211,7 +211,7 @@ def _correct_sync(
 # ── Entry point ───────────────────────────────────────────────
 
 if __name__ == "__main__":
-    port = int(os.getenv("MCP_PORT", "8000"))
+    port = int(os.getenv("PORT", os.getenv("MCP_PORT", "8000")))
     logger.info("Starting PPT Corrector MCP server on 0.0.0.0:%d", port)
     mcp.run(
         transport="streamable-http",
