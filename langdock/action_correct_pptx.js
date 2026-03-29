@@ -1,6 +1,6 @@
 const BASE_URL = "https://YOUR-RAILWAY-APP.up.railway.app";
 const POLL_INTERVAL_MS = 3000;
-const MAX_ATTEMPTS = 40; // Langdock documents a 2-minute execution timeout.
+const MAX_ATTEMPTS = 35; // 35 x 3s = 105s, leaving budget for request overhead.
 
 function getFileInput() {
   const file = data.input.document;

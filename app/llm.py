@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import logging
+import threading
+from typing import Any
 
 import httpx
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 
 logger = logging.getLogger(__name__)
+_shared_http_client: httpx.Client | None = None
+_shared_http_client_lock = threading.Lock()
 
 SYSTEM_PROMPT = """You are a highly rated and experienced Engagement Manager from McKinsey & Company in Germany. You are super good at correcting spelling and grammar errors in texts.
 
@@ -41,6 +45,7 @@ class LangdockLLMClient:
         model: str,
         min_text_length: int = 3,
         timeout_seconds: float = 60.0,
+        http_client: Any | None = None,
     ) -> None:
         if not api_key:
             raise ValueError(
@@ -57,6 +62,7 @@ class LangdockLLMClient:
         self.model = model
         self.min_text_length = min_text_length
         self.timeout_seconds = timeout_seconds
+        self.http_client = http_client or _get_shared_http_client(timeout_seconds)
 
     def correct_text(self, text: str) -> tuple[str, bool]:
         text = text.strip()
@@ -109,15 +115,14 @@ class LangdockLLMClient:
             ],
         }
 
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(
-                self.api_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
+        response = self.http_client.post(
+            self.api_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
 
         if response.status_code == 401:
             raise InvalidApiKeyError("Invalid Langdock API key")
@@ -131,4 +136,25 @@ class LangdockLLMClient:
                 corrected += block.get("text", "") or ""
 
         return corrected.strip()
+
+
+def _build_http_client(timeout_seconds: float) -> httpx.Client:
+    return httpx.Client(
+        timeout=timeout_seconds,
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+        ),
+    )
+
+
+def _get_shared_http_client(timeout_seconds: float) -> httpx.Client:
+    global _shared_http_client
+
+    if _shared_http_client is None:
+        with _shared_http_client_lock:
+            if _shared_http_client is None:
+                _shared_http_client = _build_http_client(timeout_seconds)
+
+    return _shared_http_client
 

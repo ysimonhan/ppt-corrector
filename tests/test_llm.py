@@ -47,12 +47,12 @@ def test_langdock_client_parses_successful_response(monkeypatch) -> None:
     fake_client = FakeClient(
         [FakeResponse(200, {"content": [{"type": "text", "text": "The strategic objectives"}]})]
     )
-    monkeypatch.setattr("app.llm.httpx.Client", lambda timeout: fake_client)
 
     client = LangdockLLMClient(
         api_key="sk-test",
         api_url="https://example.com",
         model="claude-sonnet-4-5-20250929",
+        http_client=fake_client,
     )
 
     corrected, ok = client.correct_text("Teh strategc obiectives")
@@ -64,12 +64,12 @@ def test_langdock_client_parses_successful_response(monkeypatch) -> None:
 
 def test_langdock_client_does_not_retry_on_invalid_api_key(monkeypatch) -> None:
     fake_client = FakeClient([FakeResponse(401, text="unauthorized")])
-    monkeypatch.setattr("app.llm.httpx.Client", lambda timeout: fake_client)
 
     client = LangdockLLMClient(
         api_key="sk-test",
         api_url="https://example.com",
         model="claude-sonnet-4-5-20250929",
+        http_client=fake_client,
     )
 
     corrected, ok = client.correct_text("Teh strategc obiectives")
@@ -86,12 +86,12 @@ def test_langdock_client_retries_transient_errors(monkeypatch) -> None:
         FakeResponse(200, {"content": [{"type": "text", "text": "Fixed text"}]}),
     ]
     fake_client = FakeClient(responses)
-    monkeypatch.setattr("app.llm.httpx.Client", lambda timeout: fake_client)
 
     client = LangdockLLMClient(
         api_key="sk-test",
         api_url="https://example.com",
         model="claude-sonnet-4-5-20250929",
+        http_client=fake_client,
     )
 
     corrected, ok = client.correct_text("Teh")
