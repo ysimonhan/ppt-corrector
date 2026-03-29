@@ -1,207 +1,147 @@
 # PowerPoint Spelling & Grammar Corrector
 
-An AI-powered tool that reads PowerPoint presentations, corrects spelling and grammar using **Claude Sonnet 4.5** via the [Langdock API](https://docs.langdock.com/api-endpoints/completion/anthropic), and saves a `_v_correctedbyai` version. Available as CLI scripts and as an MCP server for Langdock agents.
+An AI-powered FastAPI service that corrects spelling and grammar in PowerPoint files using **Claude Sonnet 4.5** via the **Langdock API**. Consultants upload a `.pptx` to Langdock, Langdock’s sandbox sends it to the backend, and the backend returns a corrected file as a base64 payload.
 
-## Features
+The service preserves formatting at the run level and supports an optional highlighted output mode for reviewed changes. It is designed for Railway deployment in the EU region with in-memory job processing and no file writes during correction.
 
-- **LLM-powered correction** -- Uses Claude Sonnet 4.5 for high-quality corrections
-- **Full text extraction** -- Handles text frames, tables, and grouped shapes
-- **Preserves formatting** -- Only text content is corrected; layout and styling stay intact
-- **Highlighted mode** -- Optionally highlights changed words with a yellow marker
-- **Correction report** -- Optional JSON report of all changes made
-- **MCP Server** -- Expose both tools to Langdock agents (or any MCP client) over HTTP
-- **Secure file transfer** -- Files uploaded via custom integration, one-time download links
-- **Retries** -- Auto-retry with exponential backoff for transient API errors
+## Architecture
 
----
-
-## Architecture (Langdock Agent)
-
-The system uses a two-step approach for secure file handling:
-
-```
-User uploads .pptx in Langdock chat
-        |
-        v
-[Custom Integration: upload_pptx]  -->  POST /api/upload  -->  returns file_id
-        |
-        v
-[MCP Tool: correct_pptx(file_id)]  -->  Processes file via LLM  -->  returns download_url
-        |
-        v
-User clicks download link (one-time, file deleted after download)
+```text
+Langdock custom action
+  |
+  | POST /jobs?highlight=false
+  | Body: { file_base64, file_name }
+  v
+FastAPI backend on Railway
+  |
+  | Background job
+  | - decode base64 into BytesIO
+  | - extract text from slides
+  | - call Langdock LLM API
+  | - preserve formatting and optionally highlight changes
+  | - store result in jobs dict
+  v
+GET /jobs/{job_id}
+  |
+  | { status: processing | done | error }
+  v
+Langdock action returns corrected PPTX file
 ```
 
-**Why two steps:**
+## API
 
-- **Custom integration** (upload): handles binary files natively via Langdock's `FileData`, stays within 2-min timeout
-- **MCP tool** (processing): can run for minutes (SSE streaming), handles LLM calls per slide
+`GET /health`
 
-## MCP Server (for Langdock agents)
-
-### Endpoints
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/api/upload` | POST | Bearer token | Upload .pptx (JSON with base64), returns `file_id` |
-| `/mcp` | POST | Bearer token | MCP Streamable HTTP (tools below) |
-| `/files/{id}` | GET | None (UUID) | One-time download of corrected .pptx |
-
-### MCP Tools
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `correct_pptx` | `file_id` | Correct spelling/grammar, return download URL |
-| `correct_pptx_highlighted` | `file_id`, `highlight_color` | Same, with changed words highlighted |
-
-### Deployed instance
-
-- **MCP endpoint**: `https://ppt-corrector-production.up.railway.app/mcp`
-- **Upload endpoint**: `https://ppt-corrector-production.up.railway.app/api/upload`
-
----
-
-## Setup: Langdock Agent
-
-### 1. Connect MCP tools
-
-1. In Langdock, go to an agent's settings or the MCP integration page
-2. Enter the MCP server URL: `https://ppt-corrector-production.up.railway.app/mcp`
-3. Select **API Key** authentication
-4. Enter the `MCP_API_KEY` value
-5. Click **Test connection** -- both tools will be auto-discovered
-6. Select the tools and save
-
-### 2. Create the custom integration
-
-Create a new custom integration in Langdock called **"PPT Corrector"** with one action:
-
-**Action: `upload_pptx`**
-
-- **Input field**: `file` (type: FILE, required)
-- **Authentication**: API Key (value = your `MCP_API_KEY`)
-- **Code** (runs in Langdock's JS sandbox):
-
-```javascript
-const file = data.input.file;
-const response = await ld.request({
-  method: "POST",
-  url: "https://ppt-corrector-production.up.railway.app/api/upload",
-  headers: {
-    "Authorization": `Bearer ${data.auth.apiKey}`,
-    "Content-Type": "application/json"
-  },
-  body: {
-    filename: file.fileName,
-    base64: file.base64,
-    mimeType: file.mimeType
-  }
-});
-return {
-  file_id: response.json.file_id,
-  filename: response.json.filename,
-  message: `File uploaded. Use file_id "${response.json.file_id}" to correct it.`
-};
+```json
+{ "status": "ok" }
 ```
 
-### 3. Assign to agent
+`POST /jobs?highlight=false`
 
-Add both the MCP tools and the custom integration to your Langdock agent. The agent will:
+Headers:
 
-1. Accept the user's uploaded .pptx
-2. Call `upload_pptx` (custom integration) to get a `file_id`
-3. Call `correct_pptx(file_id)` or `correct_pptx_highlighted(file_id)` (MCP tool)
-4. Return the one-time download link to the user
+```text
+Authorization: Bearer <API_KEY>
+```
 
----
+Body:
 
-## Security
+```json
+{
+  "file_base64": "...",
+  "file_name": "presentation.pptx"
+}
+```
 
-| Measure | Details |
-|---------|---------|
-| **Auth on upload** | `POST /api/upload` requires `Authorization: Bearer {MCP_API_KEY}` |
-| **Auth on MCP** | MCP middleware checks Bearer token |
-| **One-time download** | Corrected file deleted from disk after first `GET /files/{id}` |
-| **Unguessable URLs** | File IDs are UUID4 -- no auth needed for download link |
-| **15-min auto-purge** | Background task deletes any files older than 15 min |
-| **No persistent storage** | All files in `/tmp`, wiped on container restart |
-| **No sensitive logs** | Server only logs file_id, slide count, correction count -- never slide text |
-| **File validation** | .pptx only (ZIP magic bytes + extension), max 50 MB |
-| **HTTPS only** | Enforced by Railway |
+Response:
 
----
+```json
+{ "job_id": "<uuid>" }
+```
 
-## Run locally
+`GET /jobs/{job_id}`
+
+Headers:
+
+```text
+Authorization: Bearer <API_KEY>
+```
+
+Responses:
+
+```json
+{ "status": "processing" }
+```
+
+```json
+{
+  "status": "done",
+  "file_base64": "...",
+  "file_name": "presentation_corrected.pptx",
+  "corrections_count": 12,
+  "changes": [
+    { "slide": 1, "original": "Teh strategc obiectives for Q3", "corrected": "The strategic objectives for Q3" }
+  ]
+}
+```
+
+```json
+{ "status": "error", "message": "..." }
+```
+
+## Local Development
 
 ```bash
 python -m venv venv
-venv\Scripts\activate          # Windows
-pip install -r requirements.txt
-python mcp_server.py           # starts on http://localhost:8000/mcp
+venv\Scripts\activate
+pip install -r requirements-dev.txt
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Set `MCP_API_KEY` in `.env` to enable auth, or leave unset for local dev.
+## Environment Variables
 
----
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `API_KEY` | Yes | Bearer token required on `/jobs` endpoints |
+| `LANGDOCK_API_KEY` | Yes | Langdock API key for Claude calls |
+| `LANGDOCK_API_URL` | Yes | Langdock completions endpoint |
+| `PORT` | Yes in Railway | Port for FastAPI / Uvicorn |
 
-## CLI Usage
+Optional:
 
-### Setup
+| Variable | Purpose |
+| --- | --- |
+| `LANGDOCK_MODEL` | Override the Claude model if needed |
 
-1. **Create a virtual environment** (recommended):
+## Langdock Integration Setup
 
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate   # Windows
-   # or: source venv/bin/activate   # macOS/Linux
-   ```
+1. Create a custom integration in Langdock.
+2. Add a file input named `document`.
+3. Add a boolean input named `highlight`, defaulting to `false`.
+4. Add an API key auth field that stores the backend bearer token.
+5. Paste the reference action from [`langdock/action_correct_pptx.js`](./langdock/action_correct_pptx.js).
+6. Configure the action to call the Railway service URL for `POST /jobs` and `GET /jobs/{job_id}`.
+7. Set the auth field slug to `apiKey`, or update the script to use your chosen `data.auth.<slug>` value.
 
-2. **Install dependencies**:
+Important: Langdock documents a **2-minute execution timeout** for custom actions. The reference script polls in the sandbox, but it must still fit inside that timeout budget. If a job is still processing when the sandbox limit is reached, the action should return a clear in-progress error and let the user retry.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Railway Deployment
 
-3. **Configure Langdock API key**:
+1. Create a Railway service from this repository.
+2. Use the root `Dockerfile`.
+3. Set the Railway region to **EU West Metal, Amsterdam** in the Railway dashboard.
+4. Add the runtime variables `API_KEY`, `LANGDOCK_API_KEY`, `LANGDOCK_API_URL`, and `PORT`.
+5. Configure the health check path as `/health`.
 
-   - Copy `.env.example` to `.env`
-   - Add your Langdock API key (get one at [app.langdock.com](https://app.langdock.com)):
-
-   ```env
-   LANGDOCK_API_KEY=your_api_key_here
-   ```
-
-### Correct without highlighting
+## Tests
 
 ```bash
-python ppt_corrector.py MyPresentation.pptx
-python ppt_corrector.py MyPresentation.pptx -o CorrectedVersion.pptx
-python ppt_corrector.py MyPresentation.pptx --no-report
+venv\Scripts\python.exe -m pytest tests/ -v --tb=short
 ```
 
-### Correct with highlighted changes
+## Notes
 
-```bash
-python ppt_corrector_highlighted.py MyPresentation.pptx
-python ppt_corrector_highlighted.py MyPresentation.pptx --color FF9632  # orange
-```
-
-## Output
-
-- **Corrected file**: `{original_name}_v_correctedbyai.pptx` in the same folder as the input
-- **Report** (optional): `{corrected_name}_report.json` with a list of all changes
-
-## Environment variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `LANGDOCK_API_KEY` | Yes | Langdock API key for LLM calls |
-| `MCP_API_KEY` | No | Protects upload + MCP endpoints (Bearer token) |
-| `PUBLIC_URL` | Production | Base URL for download links (e.g. Railway URL) |
-| `MCP_PORT` / `PORT` | No | Server port (default: 8000) |
-
-## Requirements
-
-- Python 3.10+
-- Langdock API key
-- `.pptx` files (PowerPoint 2007+)
+- Processing is fully in memory.
+- No files are written to disk during correction.
+- The FastAPI job store is ephemeral; a restart clears pending jobs.
+- The backend keeps the original McKinsey-style correction prompt and run-level formatting preservation logic.
