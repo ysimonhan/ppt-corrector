@@ -2,6 +2,8 @@ venv/
 .env
 *.pyc
 __pycache__/
+.pytest_cache/
 *_v_correctedbyai.pptx
 *_report.json
 *.pptx
+.claude/
