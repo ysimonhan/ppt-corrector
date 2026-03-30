@@ -14,10 +14,11 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from app.config import Settings, get_settings
 from app.corrector import PresentationCorrectionResult, correct_presentation_bytes, validate_pptx_bytes
 from app.llm import LangdockLLMClient
-from app.models import JobCreatedResponse, JobRecord, JobRequest, JobStatusResponse
+from app.models import JobCreatedResponse, JobFileResponse, JobRecord, JobRequest, JobStatusResponse
 
 
 logger = logging.getLogger(__name__)
+PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
 def utcnow() -> datetime:
@@ -210,6 +211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get(
         "/jobs/{job_id}",
         response_model=JobStatusResponse,
+        response_model_exclude_none=True,
         dependencies=[Depends(require_api_key)],
     )
     async def get_job(job_id: str, request: Request) -> JobStatusResponse:
@@ -222,7 +224,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if job.status == "done":
             return JobStatusResponse(
                 status=job.status,
-                file_base64=job.result_base64,
                 file_name=job.file_name,
                 corrections_count=job.corrections_count,
                 changes=job.changes,
@@ -232,6 +233,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JobStatusResponse(status=job.status, message=job.error or "Unknown processing error")
 
         return JobStatusResponse(status=job.status)
+
+    @app.get(
+        "/jobs/{job_id}/file",
+        response_model=JobFileResponse,
+        dependencies=[Depends(require_api_key)],
+    )
+    async def get_job_file(job_id: str, request: Request) -> JobFileResponse:
+        async with request.app.state.jobs_lock:
+            job = request.app.state.jobs.get(job_id)
+
+        if job is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+        if job.status != "done":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not complete yet")
+
+        if not job.result_base64 or not job.file_name:
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail="Job result is no longer available")
+
+        return JobFileResponse(
+            file_base64=job.result_base64,
+            file_name=job.file_name,
+            mime_type=PPTX_MIME_TYPE,
+        )
 
     return app
 

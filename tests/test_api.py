@@ -94,8 +94,75 @@ def test_create_and_poll_job_completion(test_settings, sample_pptx_base64: str, 
     assert payload["status"] == "done"
     assert payload["file_name"] == "deck_corrected.pptx"
     assert payload["corrections_count"] == 2
-    assert payload["file_base64"]
     assert payload["changes"][0]["slide"] == 1
+
+
+def test_fetch_completed_job_file(test_settings, sample_pptx_base64: str, monkeypatch) -> None:
+    app = main_module.create_app(test_settings)
+
+    async def fake_process_job(app_obj, job_id, file_bytes, file_name, highlight):
+        await asyncio.sleep(0.05)
+        async with app_obj.state.jobs_lock:
+            job = app_obj.state.jobs[job_id]
+            job.status = "done"
+            job.result_base64 = base64.b64encode(b"PK\x03\x04" + b"9" * 200).decode("utf-8")
+            job.file_name = "deck_corrected.pptx"
+            job.corrections_count = 2
+            job.changes = [{"slide": 1, "original": "Teh", "corrected": "The"}]
+
+    monkeypatch.setattr(main_module, "process_job", fake_process_job)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/jobs",
+            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+
+        time.sleep(0.15)
+
+        result = client.get(
+            f"/jobs/{job_id}/file",
+            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+        )
+
+    assert result.status_code == 200
+    payload = result.json()
+    assert payload["file_name"] == "deck_corrected.pptx"
+    assert payload["file_base64"]
+    assert payload["mime_type"] == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def test_fetch_job_file_before_completion_returns_409(test_settings, sample_pptx_base64: str, monkeypatch) -> None:
+    app = main_module.create_app(test_settings)
+
+    async def slow_process_job(app_obj, job_id, file_bytes, file_name, highlight):
+        await asyncio.sleep(0.2)
+        async with app_obj.state.jobs_lock:
+            job = app_obj.state.jobs[job_id]
+            job.status = "done"
+            job.result_base64 = base64.b64encode(b"PK\x03\x04" + b"5" * 200).decode("utf-8")
+            job.file_name = "deck_corrected.pptx"
+
+    monkeypatch.setattr(main_module, "process_job", slow_process_job)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/jobs",
+            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+
+        result = client.get(
+            f"/jobs/{job_id}/file",
+            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+        )
+
+    assert result.status_code == 409
 
 
 def test_nonexistent_job_returns_404(test_settings) -> None:
