@@ -66,24 +66,6 @@ async function pollJob(jobId) {
   );
 }
 
-async function fetchResultFile(jobId) {
-  ld.log("Fetching corrected file...");
-
-  const response = await ld.request({
-    method: "GET",
-    url: `${BASE_URL}/jobs/${jobId}/file`,
-    headers: {
-      Authorization: `Bearer ${data.auth.apiKey}`,
-    },
-  });
-
-  if (response.status !== 200) {
-    throw new Error(`Result download failed with status ${response.status}`);
-  }
-
-  return response.json;
-}
-
 const file = getFileInput();
 const highlight = Boolean(data.input.highlight);
 
@@ -91,17 +73,13 @@ const jobId = await submitJob(file, highlight);
 ld.log(`Job created: ${jobId}`);
 
 const result = await pollJob(jobId);
-const outputFile = await fetchResultFile(jobId);
 
 return {
   files: [
     {
-      fileName: outputFile.file_name,
-      base64: outputFile.file_base64,
-      mimeType:
-        outputFile.mime_type ||
-        file.mimeType ||
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      fileName: result.file_name,
+      base64: result.file_base64,
+      mimeType: file.mimeType || "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     },
   ],
   text: `Correction complete. ${result.corrections_count || 0} changes applied.`,

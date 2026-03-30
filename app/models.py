@@ -34,12 +34,6 @@ class JobStatusResponse(BaseModel):
     message: str | None = None
 
 
-class JobFileResponse(BaseModel):
-    file_base64: str
-    file_name: str
-    mime_type: str
-
-
 @dataclass
 class JobRecord:
     status: JobStatus = "processing"

@@ -19,15 +19,11 @@ FastAPI backend on Railway
   | - extract text from slides
   | - call Langdock LLM API
   | - preserve formatting and optionally highlight changes
-  | - store status in jobs dict
+  | - store result in jobs dict
   v
 GET /jobs/{job_id}
   |
-  | { status: processing | done | error, metadata }
-  v
-GET /jobs/{job_id}/file
-  |
-  | { file_base64, file_name, mime_type }
+  | { status: processing | done | error }
   v
 Langdock action returns corrected PPTX file
 ```
@@ -80,6 +76,7 @@ Responses:
 ```json
 {
   "status": "done",
+  "file_base64": "...",
   "file_name": "presentation_corrected.pptx",
   "corrections_count": 12,
   "changes": [
@@ -90,24 +87,6 @@ Responses:
 
 ```json
 { "status": "error", "message": "..." }
-```
-
-`GET /jobs/{job_id}/file`
-
-Headers:
-
-```text
-Authorization: Bearer <API_KEY>
-```
-
-Response:
-
-```json
-{
-  "file_base64": "...",
-  "file_name": "presentation_corrected.pptx",
-  "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-}
 ```
 
 ## Local Development
@@ -141,7 +120,7 @@ Optional:
 3. Add a boolean input named `highlight`, defaulting to `false`.
 4. Add an API key auth field that stores the backend bearer token.
 5. Paste the reference action from [`langdock/action_correct_pptx.js`](./langdock/action_correct_pptx.js).
-6. Configure the action to call the Railway service URL for `POST /jobs`, `GET /jobs/{job_id}`, and `GET /jobs/{job_id}/file`.
+6. Configure the action to call the Railway service URL for `POST /jobs` and `GET /jobs/{job_id}`.
 7. Set the auth field slug to `apiKey`, or update the script to use your chosen `data.auth.<slug>` value.
 
 Important: Langdock documents a **2-minute execution timeout** for custom actions. The reference script polls in the sandbox, but it must still fit inside that timeout budget. If a job is still processing when the sandbox limit is reached, the action should return a clear in-progress error and let the user retry.
