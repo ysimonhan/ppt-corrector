@@ -62,6 +62,38 @@ def test_langdock_client_parses_successful_response(monkeypatch) -> None:
     assert fake_client.calls == 1
 
 
+def test_langdock_client_parses_openai_chat_completions_response() -> None:
+    fake_client = FakeClient(
+        [
+            FakeResponse(
+                200,
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Die Ueberschrift ist falsch",
+                            }
+                        }
+                    ]
+                },
+            )
+        ]
+    )
+
+    client = LangdockLLMClient(
+        api_key="sk-test",
+        api_url="https://example.com",
+        model="gpt-5.4",
+        http_client=fake_client,
+    )
+
+    corrected, ok = client.correct_text("Die Uberschrift ist falsch")
+
+    assert ok is True
+    assert corrected == "Die Ueberschrift ist falsch"
+    assert fake_client.calls == 1
+
+
 def test_langdock_client_does_not_retry_on_invalid_api_key(monkeypatch) -> None:
     fake_client = FakeClient([FakeResponse(401, text="unauthorized")])
 

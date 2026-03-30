@@ -6,7 +6,7 @@ from functools import lru_cache
 
 
 DEFAULT_LANGDOCK_API_URL = "https://api.langdock.com/anthropic/eu/v1/messages"
-DEFAULT_LANGDOCK_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_LANGDOCK_MODEL = "claude-sonnet-4-6"
 
 
 @dataclass(frozen=True)

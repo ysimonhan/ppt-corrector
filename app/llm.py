@@ -129,11 +129,7 @@ class LangdockLLMClient:
 
         response.raise_for_status()
         data = response.json()
-
-        corrected = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                corrected += block.get("text", "") or ""
+        corrected = _extract_response_text(data)
 
         return corrected.strip()
 
@@ -157,4 +153,37 @@ def _get_shared_http_client(timeout_seconds: float) -> httpx.Client:
                 _shared_http_client = _build_http_client(timeout_seconds)
 
     return _shared_http_client
+
+
+def _extract_response_text(data: dict[str, Any]) -> str:
+    # Anthropic-style messages API: {"content": [{"type": "text", "text": "..."}]}
+    content_blocks = data.get("content", [])
+    if isinstance(content_blocks, list):
+        corrected = ""
+        for block in content_blocks:
+            if isinstance(block, dict) and block.get("type") == "text":
+                corrected += block.get("text", "") or ""
+        if corrected.strip():
+            return corrected
+
+    # OpenAI-style chat completions:
+    # {"choices": [{"message": {"content": "..."}}]}
+    choices = data.get("choices", [])
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            corrected = ""
+            for item in content:
+                if isinstance(item, dict) and item.get("type") in {"text", "output_text"}:
+                    corrected += item.get("text", "") or ""
+            if corrected.strip():
+                return corrected
+
+    logger.warning("Unrecognized Langdock response shape. Top-level keys: %s", sorted(data.keys()))
+    return ""
 
