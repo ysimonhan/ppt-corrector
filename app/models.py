@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel
@@ -34,14 +32,9 @@ class JobStatusResponse(BaseModel):
     message: str | None = None
 
 
-@dataclass
-class JobRecord:
-    status: JobStatus = "processing"
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    result_base64: str | None = None
-    file_name: str | None = None
-    corrections_count: int | None = None
-    changes: list[dict[str, str | int]] = field(default_factory=list)
-    error: str | None = None
-    highlight: bool = False
+class HealthResponse(BaseModel):
+    status: str
 
+
+class AuthValidationResponse(BaseModel):
+    status: str

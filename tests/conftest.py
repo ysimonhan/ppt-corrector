@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from pptx import Presentation
@@ -9,7 +10,8 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Inches, Pt
 
 from app.config import Settings
-from app.corrector import PresentationCorrectionResult
+from app.runtime import AppRuntime, build_runtime
+from app.storage import MemoryObjectStorage
 
 
 def build_sample_pptx_bytes() -> bytes:
@@ -76,6 +78,14 @@ class FakeLLMClient:
         return text, True
 
 
+class RecordingJobQueue:
+    def __init__(self) -> None:
+        self.job_ids: list[str] = []
+
+    def enqueue(self, job_id: str) -> None:
+        self.job_ids.append(job_id)
+
+
 @pytest.fixture()
 def sample_pptx_bytes() -> bytes:
     return build_sample_pptx_bytes()
@@ -97,19 +107,32 @@ def sample_pptx_base64(sample_pptx_bytes: bytes) -> str:
 
 
 @pytest.fixture()
-def test_settings() -> Settings:
+def test_settings(tmp_path: Path) -> Settings:
+    db_path = tmp_path / "ppt_corrector_test.db"
     return Settings(
         api_key="test-api-key",
         langdock_api_key="test-langdock-key",
         langdock_api_url="https://example.com/langdock",
-        langdock_model="claude-sonnet-4-5-20250929",
+        langdock_model="gpt-5.4",
         port=8000,
         min_text_length=3,
         llm_timeout_seconds=1.0,
         max_upload_size_bytes=10 * 1024 * 1024,
         job_ttl_seconds=600,
         job_cleanup_interval_seconds=60,
+        metadata_retention_seconds=3600,
         default_highlight_color="FFFF00",
+        database_url=f"sqlite:///{db_path}",
+        queue_backend="inline",
+        redis_url="redis://localhost:6379/0",
+        rq_queue_name="ppt-corrector-test",
+        storage_backend="memory",
+        s3_bucket="",
+        s3_region="eu-central-1",
+        s3_endpoint_url="",
+        s3_access_key_id="",
+        s3_secret_access_key="",
+        s3_prefix="ppt-corrector-test",
     )
 
 
@@ -124,6 +147,25 @@ def fake_llm_client() -> FakeLLMClient:
 
 
 @pytest.fixture()
-def correction_result_class() -> type[PresentationCorrectionResult]:
-    return PresentationCorrectionResult
+def recording_queue() -> RecordingJobQueue:
+    return RecordingJobQueue()
 
+
+@pytest.fixture()
+def memory_storage() -> MemoryObjectStorage:
+    return MemoryObjectStorage()
+
+
+@pytest.fixture()
+def runtime(
+    test_settings: Settings,
+    recording_queue: RecordingJobQueue,
+    memory_storage: MemoryObjectStorage,
+    fake_llm_client: FakeLLMClient,
+) -> AppRuntime:
+    return build_runtime(
+        test_settings,
+        storage=memory_storage,
+        queue=recording_queue,
+        llm_client_factory=lambda: fake_llm_client,
+    )

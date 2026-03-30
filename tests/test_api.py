@@ -1,48 +1,49 @@
 from __future__ import annotations
 
-import asyncio
 import base64
-import time
-from types import SimpleNamespace
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-import app.main as main_module
-from app.corrector import PresentationCorrectionResult
-from tests.conftest import FakeLLMClient
-
-
-def make_success_result() -> PresentationCorrectionResult:
-    return PresentationCorrectionResult(
-        file_bytes=b"PK\x03\x04" + b"0" * 200,
-        file_name="proposal_corrected.pptx",
-        corrections_count=2,
-        total_slides=2,
-        changes=[
-            {"slide": 1, "original": "Teh", "corrected": "The"},
-            {"slide": 2, "original": "Recieved", "corrected": "Received"},
-        ],
-    )
+from app.entities import AuditEventEntity, JobEntity
+from app.main import create_app
+from app.worker_tasks import cleanup_expired_content, process_job
 
 
-def build_test_app(test_settings):
-    app = main_module.create_app(test_settings)
-    app.state.process_presentation = lambda file_bytes, file_name, highlight, settings: make_success_result()
-    return app
+def build_client(runtime):
+    app = create_app(runtime=runtime)
+    return TestClient(app)
 
 
-def test_healthcheck_does_not_require_auth(test_settings) -> None:
-    app = build_test_app(test_settings)
-    with TestClient(app) as client:
+def test_healthcheck_does_not_require_auth(runtime) -> None:
+    with build_client(runtime) as client:
         response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
-def test_jobs_endpoints_require_auth(test_settings, sample_pptx_base64: str) -> None:
-    app = build_test_app(test_settings)
-    with TestClient(app) as client:
+def test_auth_validate_requires_auth(runtime) -> None:
+    with build_client(runtime) as client:
+        response = client.get("/auth/validate")
+
+    assert response.status_code == 401
+
+
+def test_auth_validate_returns_ok(runtime) -> None:
+    with build_client(runtime) as client:
+        response = client.get(
+            "/auth/validate",
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_jobs_endpoints_require_auth(runtime, sample_pptx_base64: str) -> None:
+    with build_client(runtime) as client:
         response = client.post(
             "/jobs",
             json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
@@ -51,145 +52,155 @@ def test_jobs_endpoints_require_auth(test_settings, sample_pptx_base64: str) -> 
     assert response.status_code == 401
 
 
-def test_create_and_poll_job_completion(test_settings, sample_pptx_base64: str, monkeypatch) -> None:
-    app = main_module.create_app(test_settings)
-
-    async def fake_process_job(app_obj, job_id, file_bytes, file_name, highlight):
-        await asyncio.sleep(0.05)
-        async with app_obj.state.jobs_lock:
-            job = app_obj.state.jobs[job_id]
-            job.status = "done"
-            job.result_base64 = base64.b64encode(b"PK\x03\x04" + b"1" * 200).decode("utf-8")
-            job.file_name = "deck_corrected.pptx"
-            job.corrections_count = 2
-            job.changes = [{"slide": 1, "original": "Teh", "corrected": "The"}]
-
-    monkeypatch.setattr(main_module, "process_job", fake_process_job)
-
-    with TestClient(app) as client:
+def test_create_job_persists_metadata_and_enqueues(runtime, recording_queue, sample_pptx_base64: str) -> None:
+    with build_client(runtime) as client:
         response = client.post(
             "/jobs?highlight=true",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
             json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
         )
-        assert response.status_code == 202
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    assert recording_queue.job_ids == [job_id]
+
+    with runtime.session_factory() as session:
+        job = session.get(JobEntity, job_id)
+        assert job is not None
+        assert job.status == "queued"
+        assert job.highlight is True
+        assert job.file_name == "deck.pptx"
+
+        events = session.scalars(
+            select(AuditEventEntity).where(AuditEventEntity.job_id == job_id)
+        ).all()
+        assert [event.event_type for event in events] == ["job_created"]
+
+
+def test_create_and_process_job_completion(runtime, sample_pptx_base64: str) -> None:
+    with build_client(runtime) as client:
+        response = client.post(
+            "/jobs",
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
+            json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
+        )
         job_id = response.json()["job_id"]
 
-        initial = client.get(
+        processing = client.get(
             f"/jobs/{job_id}",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
         )
-        assert initial.status_code == 200
-        assert initial.json()["status"] in {"processing", "done"}
 
-        time.sleep(0.15)
+        process_job(job_id, runtime)
 
         done = client.get(
             f"/jobs/{job_id}",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
         )
+
+    assert processing.status_code == 200
+    assert processing.json() == {"status": "processing"}
 
     assert done.status_code == 200
     payload = done.json()
     assert payload["status"] == "done"
     assert payload["file_name"] == "deck_corrected.pptx"
     assert payload["corrections_count"] == 2
-    assert payload["file_base64"]
-    assert payload["changes"][0]["slide"] == 1
+    assert len(payload["changes"]) == 2
+    assert base64.b64decode(payload["file_base64"])[:4] == b"PK\x03\x04"
 
 
-def test_nonexistent_job_returns_404(test_settings) -> None:
-    app = build_test_app(test_settings)
-    with TestClient(app) as client:
+def test_nonexistent_job_returns_404(runtime) -> None:
+    with build_client(runtime) as client:
         response = client.get(
             "/jobs/does-not-exist",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
         )
 
     assert response.status_code == 404
 
 
-def test_invalid_base64_upload_returns_400(test_settings) -> None:
-    app = build_test_app(test_settings)
-    with TestClient(app) as client:
+def test_invalid_base64_upload_returns_400(runtime) -> None:
+    with build_client(runtime) as client:
         response = client.post(
             "/jobs",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
             json={"file_base64": "not-base64", "file_name": "deck.pptx"},
         )
 
     assert response.status_code == 400
 
 
-def test_invalid_pptx_upload_returns_400(test_settings) -> None:
-    app = build_test_app(test_settings)
+def test_invalid_pptx_upload_returns_400(runtime) -> None:
     payload = base64.b64encode(b"not-a-pptx").decode("utf-8")
 
-    with TestClient(app) as client:
+    with build_client(runtime) as client:
         response = client.post(
             "/jobs",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
             json={"file_base64": payload, "file_name": "deck.txt"},
         )
 
     assert response.status_code == 400
 
 
-def test_llm_error_sets_job_error_status(test_settings, sample_pptx_base64: str, monkeypatch) -> None:
-    app = main_module.create_app(test_settings)
+def test_worker_failure_sets_job_error_and_audit(runtime, sample_pptx_base64: str) -> None:
+    runtime.llm_client_factory = lambda: (_ for _ in ()).throw(RuntimeError("LLM init failed"))
 
-    def raising_processor(file_bytes, file_name, highlight, settings):
-        raise RuntimeError("LLM API error")
-
-    app.state.process_presentation = raising_processor
-
-    with TestClient(app) as client:
+    with build_client(runtime) as client:
         response = client.post(
             "/jobs",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
             json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
         )
-        assert response.status_code == 202
         job_id = response.json()["job_id"]
 
-        time.sleep(0.1)
+        process_job(job_id, runtime)
 
         job = client.get(
             f"/jobs/{job_id}",
-            headers={"Authorization": f"Bearer {test_settings.api_key}"},
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
         )
 
     assert job.status_code == 200
     assert job.json()["status"] == "error"
-    assert "LLM API error" in job.json()["message"]
+    assert "LLM init failed" in job.json()["message"]
+
+    with runtime.session_factory() as session:
+        events = session.scalars(
+            select(AuditEventEntity).where(AuditEventEntity.job_id == job_id)
+        ).all()
+        assert [event.event_type for event in events] == [
+            "job_created",
+            "job_processing_started",
+            "job_failed",
+        ]
 
 
-def test_concurrent_job_creation_returns_unique_ids(test_settings, sample_pptx_base64: str, monkeypatch) -> None:
-    app = main_module.create_app(test_settings)
+def test_cleanup_expired_content_deletes_objects(runtime, sample_pptx_base64: str, memory_storage) -> None:
+    with build_client(runtime) as client:
+        response = client.post(
+            "/jobs",
+            headers={"Authorization": f"Bearer {runtime.settings.api_key}"},
+            json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
+        )
+        job_id = response.json()["job_id"]
 
-    async def fake_process_job(app_obj, job_id, file_bytes, file_name, highlight):
-        async with app_obj.state.jobs_lock:
-            job = app_obj.state.jobs[job_id]
-            job.status = "done"
-            job.result_base64 = base64.b64encode(b"PK\x03\x04" + b"2" * 200).decode("utf-8")
-            job.file_name = "parallel_corrected.pptx"
-            job.corrections_count = 1
-            job.changes = [{"slide": 1, "original": "Teh", "corrected": "The"}]
+    process_job(job_id, runtime)
 
-    monkeypatch.setattr(main_module, "process_job", fake_process_job)
+    with runtime.session_factory() as session:
+        job = session.get(JobEntity, job_id)
+        job.expires_at = job.expires_at - timedelta(hours=2)
+        session.commit()
+        input_key = job.input_object_key
+        output_key = job.output_object_key
 
-    with TestClient(app) as client:
-        responses = []
-        for _ in range(3):
-            responses.append(
-                client.post(
-                    "/jobs",
-                    headers={"Authorization": f"Bearer {test_settings.api_key}"},
-                    json={"file_base64": sample_pptx_base64, "file_name": "deck.pptx"},
-                )
-            )
+    deleted = cleanup_expired_content(runtime)
 
-    assert all(response.status_code == 202 for response in responses)
-    job_ids = [response.json()["job_id"] for response in responses]
-    assert len(set(job_ids)) == 3
+    assert deleted == 1
+    assert input_key not in memory_storage.objects
+    assert output_key not in memory_storage.objects
 
+    with runtime.session_factory() as session:
+        job = session.get(JobEntity, job_id)
+        assert job.content_deleted_at is not None
