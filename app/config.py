@@ -19,7 +19,7 @@ class Settings:
     min_text_length: int = 3
     llm_timeout_seconds: float = 60.0
     max_upload_size_bytes: int = 50 * 1024 * 1024
-    job_ttl_seconds: int = 10 * 60
+    job_ttl_seconds: int = 60 * 60
     job_cleanup_interval_seconds: int = 60
     default_highlight_color: str = "FFFF00"
 
@@ -39,6 +39,8 @@ class Settings:
             langdock_api_url=os.getenv("LANGDOCK_API_URL", DEFAULT_LANGDOCK_API_URL).strip(),
             langdock_model=os.getenv("LANGDOCK_MODEL", DEFAULT_LANGDOCK_MODEL).strip(),
             port=int(os.getenv("PORT", "8000")),
+            job_ttl_seconds=int(os.getenv("JOB_TTL_SECONDS", str(60 * 60))),
+            job_cleanup_interval_seconds=int(os.getenv("JOB_CLEANUP_INTERVAL_SECONDS", "60")),
         )
 
 
