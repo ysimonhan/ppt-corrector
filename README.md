@@ -1,13 +1,13 @@
 # PowerPoint Spelling & Grammar Corrector
 
-An AI-powered FastAPI service that corrects spelling and grammar in PowerPoint files using **Claude Sonnet 4.5** via the **Langdock API**. Consultants upload a `.pptx` to Langdock, Langdock’s sandbox sends it to the backend, and the backend returns a corrected file as a base64 payload.
+An AI-powered FastAPI service that corrects spelling and grammar in PowerPoint files using **Claude Sonnet 4.5** via the **Langdock API**. Consultants upload a `.pptx` to Langdock, Langdock starts a background correction job, and a follow-up action retrieves the corrected file as a base64 payload.
 
 The service preserves formatting at the run level and supports an optional highlighted output mode for reviewed changes. It is designed for Railway deployment in the EU region with in-memory job processing and no file writes during correction.
 
 ## Architecture
 
 ```text
-Langdock custom action
+Langdock Action 1: Start Correction
   |
   | POST /jobs?highlight=false
   | Body: { file_base64, file_name }
@@ -21,11 +21,12 @@ FastAPI backend on Railway
   | - preserve formatting and optionally highlight changes
   | - store result in jobs dict
   v
-GET /jobs/{job_id}
+Langdock Action 2: Get Correction Result
   |
+  | GET /jobs/{job_id}
   | { status: processing | done | error }
   v
-Langdock action returns corrected PPTX file
+Langdock action returns corrected PPTX file in chat
 ```
 
 ## API
@@ -112,18 +113,23 @@ Optional:
 | Variable | Purpose |
 | --- | --- |
 | `LANGDOCK_MODEL` | Override the Claude model if needed |
+| `JOB_TTL_SECONDS` | How long jobs stay available in memory. Default: `3600` |
+| `JOB_CLEANUP_INTERVAL_SECONDS` | How often expired jobs are purged. Default: `60` |
 
 ## Langdock Integration Setup
 
 1. Create a custom integration in Langdock.
-2. Add a file input named `document`.
-3. Add a boolean input named `highlight`, defaulting to `false`.
-4. Add an API key auth field that stores the backend bearer token.
-5. Paste the reference action from [`langdock/action_correct_pptx.js`](./langdock/action_correct_pptx.js).
-6. Configure the action to call the Railway service URL for `POST /jobs` and `GET /jobs/{job_id}`.
+2. Add an API key auth field that stores the backend bearer token.
+3. Create **Action 1: Start Correction**.
+4. Add a file input named `document`.
+5. Add a boolean input named `highlight`, defaulting to `false`.
+6. Paste the reference action from [`langdock/action_start_correction.js`](./langdock/action_start_correction.js).
 7. Set the auth field slug to `apiKey`, or update the script to use your chosen `data.auth.<slug>` value.
+8. Create **Action 2: Get Correction Result**.
+9. Add a text input named `jobId`.
+10. Paste the reference action from [`langdock/action_get_correction_result.js`](./langdock/action_get_correction_result.js).
 
-Important: Langdock documents a **2-minute execution timeout** for custom actions. The reference script polls in the sandbox, but it must still fit inside that timeout budget. If a job is still processing when the sandbox limit is reached, the action should return a clear in-progress error and let the user retry.
+Important: Langdock documents a **2-minute execution timeout** for custom actions. The two-action setup avoids long polling in one action: the first action only creates the job, and the second action retrieves the result later with the `job_id`.
 
 ## Railway Deployment
 
@@ -143,5 +149,5 @@ venv\Scripts\python.exe -m pytest tests/ -v --tb=short
 
 - Processing is fully in memory.
 - No files are written to disk during correction.
-- The FastAPI job store is ephemeral; a restart clears pending jobs.
+- The FastAPI job store is ephemeral; a restart clears pending jobs and completed results that were not yet retrieved.
 - The backend keeps the original McKinsey-style correction prompt and run-level formatting preservation logic.
